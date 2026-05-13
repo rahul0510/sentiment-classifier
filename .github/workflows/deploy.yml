@@ -1,0 +1,208 @@
+# ── CI/CD Pipeline ────────────────────────────────────────────────────────────
+# Trigger: every push to the main branch
+#
+# What this pipeline does:
+#   1. Builds Backend Docker image  → pushes to AWS ECR
+#   2. Builds Frontend Docker image → pushes to AWS ECR
+#   3. Deploys both to AWS ECS (Elastic Container Service)
+#
+# Required GitHub Secrets (set in repo Settings → Secrets → Actions):
+#   AWS_ACCESS_KEY_ID       → your AWS IAM user access key
+#   AWS_SECRET_ACCESS_KEY   → your AWS IAM user secret key
+#   AWS_REGION              → e.g. us-east-1
+#   ECR_REGISTRY            → e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
+#   ECS_CLUSTER             → your ECS cluster name
+#   ECS_SERVICE_BACKEND     → your backend ECS service name
+#   ECS_SERVICE_FRONTEND    → your frontend ECS service name
+#   TASK_DEFINITION_BACKEND → your backend ECS task definition name
+#   TASK_DEFINITION_FRONTEND→ your frontend ECS task definition name
+
+name: Build and Deploy to AWS ECS
+
+on:
+  push:
+    branches:
+      - main          # triggers on every push to main
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+env:
+  AWS_REGION:           ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY:         ${{ secrets.ECR_REGISTRY }}
+  ECR_REPO_BACKEND:     sentiment-backend
+  ECR_REPO_FRONTEND:    sentiment-frontend
+
+jobs:
+
+  # ── Job 1: Run tests before building ────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          cd BE
+          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run backend syntax check
+        run: |
+          cd BE
+          python -m py_compile app/main.py app/model.py app/schemas.py app/utils.py
+          echo "✅ All Python files passed syntax check"
+
+  # ── Job 2: Build & Push Backend image to ECR ────────────────────────────────
+  build-and-push-backend:
+    name: Build & Push Backend
+    runs-on: ubuntu-latest
+    needs: test          # only runs if tests pass
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag and push Backend image
+        id: build-image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          IMAGE_URI=$ECR_REGISTRY/$ECR_REPO_BACKEND:$IMAGE_TAG
+
+          docker build -t $IMAGE_URI ./BE
+          docker push $IMAGE_URI
+
+          # Also tag as latest
+          docker tag $IMAGE_URI $ECR_REGISTRY/$ECR_REPO_BACKEND:latest
+          docker push $ECR_REGISTRY/$ECR_REPO_BACKEND:latest
+
+          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "✅ Backend image pushed: $IMAGE_URI"
+
+  # ── Job 3: Build & Push Frontend image to ECR ───────────────────────────────
+  build-and-push-frontend:
+    name: Build & Push Frontend
+    runs-on: ubuntu-latest
+    needs: test          # only runs if tests pass
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag and push Frontend image
+        id: build-image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          IMAGE_URI=$ECR_REGISTRY/$ECR_REPO_FRONTEND:$IMAGE_TAG
+
+          docker build -t $IMAGE_URI ./FE
+          docker push $IMAGE_URI
+
+          # Also tag as latest
+          docker tag $IMAGE_URI $ECR_REGISTRY/$ECR_REPO_FRONTEND:latest
+          docker push $ECR_REGISTRY/$ECR_REPO_FRONTEND:latest
+
+          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "✅ Frontend image pushed: $IMAGE_URI"
+
+  # ── Job 4: Deploy Backend to ECS ────────────────────────────────────────────
+  deploy-backend:
+    name: Deploy Backend to ECS
+    runs-on: ubuntu-latest
+    needs: build-and-push-backend
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ secrets.TASK_DEFINITION_BACKEND }} \
+            --query taskDefinition > task-def-backend.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def-backend.json
+          container-name:  sentiment-backend
+          image:           ${{ needs.build-and-push-backend.outputs.image }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:  ${{ steps.task-def.outputs.task-definition }}
+          service:          ${{ secrets.ECS_SERVICE_BACKEND }}
+          cluster:          ${{ secrets.ECS_CLUSTER }}
+          wait-for-service-stability: true   # waits until deployment is healthy
+
+  # ── Job 5: Deploy Frontend to ECS ───────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy Frontend to ECS
+    runs-on: ubuntu-latest
+    needs: [build-and-push-frontend, deploy-backend]   # frontend deploys after backend
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ secrets.TASK_DEFINITION_FRONTEND }} \
+            --query taskDefinition > task-def-frontend.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def-frontend.json
+          container-name:  sentiment-frontend
+          image:           ${{ needs.build-and-push-frontend.outputs.image }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:  ${{ steps.task-def.outputs.task-definition }}
+          service:          ${{ secrets.ECS_SERVICE_FRONTEND }}
+          cluster:          ${{ secrets.ECS_CLUSTER }}
+          wait-for-service-stability: true

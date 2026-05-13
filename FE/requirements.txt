@@ -1,0 +1,7 @@
+# ── Frontend dependencies ─────────────────────────────────────────────────────
+
+# Streamlit web app framework
+streamlit==1.35.0
+
+# HTTP client for calling the FastAPI backend
+requests==2.32.2

@@ -1,0 +1,56 @@
+# docker-compose.yml
+# Orchestrates the backend (FastAPI) and frontend (Streamlit) as two services.
+#
+# Usage:
+#   docker compose up --build          # build images and start both services
+#   docker compose up -d               # run in detached (background) mode
+#   docker compose down                # stop and remove containers
+#   docker compose logs -f             # follow logs from both services
+
+services:
+
+  # ── FastAPI backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./BE          # build context is the BE folder
+      dockerfile: Dockerfile
+    container_name: sentiment-backend
+    ports:
+      - "8000:8000"          # host:container — API accessible at http://localhost:8000
+    environment:
+      - PYTHONUNBUFFERED=1   # ensures logs appear in real time
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s      # model download can take ~60 s on first boot
+      retries: 3
+    networks:
+      - sentiment-net
+
+  # ── Streamlit frontend ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./FE          # build context is the FE folder
+      dockerfile: Dockerfile
+    container_name: sentiment-frontend
+    ports:
+      - "8501:8501"          # host:container — UI accessible at http://localhost:8501
+    environment:
+      # Docker's internal DNS resolves "backend" to the backend container's IP
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy   # wait for backend health check to pass
+    restart: unless-stopped
+    networks:
+      - sentiment-net
+
+# ── Shared network ────────────────────────────────────────────────────────────
+# Both services share this bridge network so the frontend can reach the
+# backend by its service name ("backend") rather than an IP address.
+networks:
+  sentiment-net:
+    driver: bridge
