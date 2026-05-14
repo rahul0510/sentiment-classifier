@@ -32,18 +32,14 @@ COPY app/ app/
 # Switch to non-root user
 USER appuser
 
-# Pre-download the HuggingFace model weights into the image at build time.
-# This avoids a slow cold-start when the container first receives a request.
-# Remove this RUN block if you prefer to download at runtime instead.
-RUN python -c "\
-from transformers import pipeline; \
-pipeline('sentiment-analysis', model='cardiffnlp/twitter-roberta-base-sentiment')"
+# Model is downloaded at container startup (not build time).
+# This keeps the build fast. The model is cached in HF_HOME after first run.
 
 # Expose the API port
 EXPOSE 8000
 
 # Health check so Docker / Kubernetes knows when the service is ready
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
 # Start the API server
