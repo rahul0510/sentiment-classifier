@@ -146,7 +146,7 @@ def check_backend_health() -> bool:
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔍 Sentiment Analyser")
 st.markdown(
-    "<p class='sub'>Powered by <strong>cardiffnlp/twitter-roberta-base-sentiment</strong> "
+    "<p class='sub'>Powered by <strong>Llama 3.1 (Groq API)</strong> "
     "via a FastAPI backend.</p>",
     unsafe_allow_html=True,
 )
@@ -253,7 +253,7 @@ if predict_clicked:
 st.divider()
 st.markdown(
     "<p class='sub' style='text-align:center;'>"
-    "Sentiment Analysis App · FastAPI + Streamlit · RoBERTa"
+    "Sentiment Analysis App · FastAPI + Streamlit · Llama 3.1 via Groq"
     "</p>",
     unsafe_allow_html=True,
 )

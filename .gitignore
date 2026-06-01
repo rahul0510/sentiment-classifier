@@ -46,6 +46,10 @@ env/
 .DS_Store
 Thumbs.db
 
+# ── AWS / Deploy secrets (NEVER commit) ──────────────────────────────────────
+*.pem
+deploy/_tmp.env
+
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 logs/

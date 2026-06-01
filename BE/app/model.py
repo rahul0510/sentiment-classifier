@@ -1,89 +1,96 @@
 # model.py
-# Responsible for loading the HuggingFace model exactly once at startup and
-# exposing a single predict() function consumed by the API routes.
-#
-# We use a module-level singleton (_pipeline) so the model is loaded into
-# memory only once per process, keeping inference latency low.
+# Calls the Groq API (Llama 3) for sentiment classification.
+# No local model — inference runs on Groq's servers.
 
 from __future__ import annotations
 
-from functools import lru_cache
+import json
+import os
 from typing import Any
 
-from transformers import pipeline
+import requests
 
-from app.utils import map_label, setup_logger
+from app.utils import setup_logger
 
 logger = setup_logger("model")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Model configuration
+# Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "cardiffnlp/twitter-roberta-base-sentiment"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# HuggingFace Pipelines are NOT thread-safe by default.
-# Setting device=-1 forces CPU inference which is safe for concurrent requests
-# without needing CUDA streams.  Swap to device=0 if a GPU is available.
-DEVICE = -1  # -1 = CPU, 0 = first GPU
-
+HEADERS = {
+    "Authorization": f"Bearer {GROQ_API_KEY}",
+    "Content-Type": "application/json",
+}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Singleton loader
+# System prompt — forces Llama 3 to return only structured JSON
 # ──────────────────────────────────────────────────────────────────────────────
 
-@lru_cache(maxsize=1)
-def get_pipeline() -> Any:
-    """
-    Load and cache the sentiment analysis pipeline.
+SYSTEM_PROMPT = """You are a sentiment analysis engine.
+Classify the sentiment of the user's text and respond ONLY with a JSON object in this exact format:
+{"sentiment": "<label>", "confidence": <score>}
 
-    lru_cache ensures the model is only downloaded and loaded once for the
-    entire lifetime of the process, regardless of how many requests arrive.
-    """
-    logger.info("Loading model: %s  (this may take a moment on first run)", MODEL_NAME)
-    sentiment_pipeline = pipeline(
-        task="sentiment-analysis",
-        model=MODEL_NAME,
-        device=DEVICE,
-    )
-    logger.info("Model loaded successfully.")
-    return sentiment_pipeline
+Rules:
+- sentiment must be exactly one of: Positive, Negative, Neutral
+- confidence must be a float between 0.0 and 1.0
+- Output ONLY the JSON object — no explanation, no markdown, no extra text."""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Public inference function
+# Inference
 # ──────────────────────────────────────────────────────────────────────────────
 
 def predict(text: str) -> dict[str, Any]:
     """
-    Run sentiment inference on a single piece of text.
-
-    Args:
-        text: Raw input string from the user.
+    Classify the sentiment of the given text using Groq (Llama 3).
 
     Returns:
-        A dict with keys:
+        dict with keys:
           - sentiment (str): 'Positive', 'Neutral', or 'Negative'
-          - confidence (float): Model confidence score in [0, 1]
-
-    Raises:
-        RuntimeError: If the pipeline returns an unexpected result structure.
+          - confidence (float): confidence score in [0, 1]
     """
-    nlp = get_pipeline()
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": f"Text: {text}"},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 60,
+    }
 
-    # truncation=True silently truncates texts longer than the model's max
-    # token length (512 for RoBERTa) instead of raising an error.
-    results: list[dict] = nlp(text, truncation=True)
+    try:
+        response = requests.post(GROQ_API_URL, headers=HEADERS, json=payload, timeout=30)
+        response.raise_for_status()
+    except requests.exceptions.Timeout:
+        raise RuntimeError("Groq API request timed out.")
+    except requests.exceptions.HTTPError as e:
+        raise RuntimeError(
+            f"Groq API error {e.response.status_code}: {e.response.text}"
+        ) from e
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Groq API connection error: {e}") from e
 
-    if not results:
-        raise RuntimeError("Model returned an empty result.")
+    raw_text: str = (
+        response.json()["choices"][0]["message"]["content"].strip()
+    )
+    logger.info("Groq raw response: %s", raw_text)
 
-    top_result = results[0]
-    raw_label: str = top_result["label"]
-    score: float = round(float(top_result["score"]), 4)
+    try:
+        result = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Non-JSON response from Groq: {raw_text!r}") from e
 
-    sentiment = map_label(raw_label)
+    sentiment  = str(result.get("sentiment", "Neutral")).capitalize()
+    confidence = round(float(result.get("confidence", 0.0)), 4)
 
-    logger.info("Prediction: %s (%.4f) for text snippet: %.60r", sentiment, score, text)
+    if sentiment not in ("Positive", "Negative", "Neutral"):
+        sentiment = "Neutral"
 
-    return {"sentiment": sentiment, "confidence": score}
+    logger.info("Prediction: %s (%.4f) for text: %.60r", sentiment, confidence, text)
+    return {"sentiment": sentiment, "confidence": confidence}

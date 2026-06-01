@@ -1,18 +1,14 @@
 # ── Backend dependencies ──────────────────────────────────────────────────────
-# Pin major versions for reproducibility; bump intentionally when upgrading.
 
 # Web framework
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 
-# Data validation (FastAPI peer dependency)
+# Data validation
 pydantic==2.7.1
 
-# HuggingFace inference stack
-transformers==4.41.1
-# CPU-only PyTorch (~300 MB). The extra-index-url is set in Dockerfile.
-torch==2.3.0+cpu
-sentencepiece==0.2.0  # tokeniser dependency for some models
+# HTTP client — calls HuggingFace Inference API
+requests==2.32.2
 
-# Optional: speeds up tokenisation
-tokenizers==0.19.1
+# Load .env credentials
+python-dotenv==1.0.1
